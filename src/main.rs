@@ -16,7 +16,7 @@ use structopt::StructOpt;
 
 const RING_SIZE: usize = 16;
 const NO_BUFFER: Option<Buffer> = None;
-const MAX_READ_SIZE: usize = 1024 * 16;
+const MAX_READ_SIZE: usize = 4096 * 16;
 
 #[derive(StructOpt)]
 struct Opt {
