@@ -8,7 +8,7 @@ use std::{
 };
 
 use anyhow::Result;
-use io_uring::{opcode, types, IoUring};
+use io_uring::{opcode, types, IoUring, Probe};
 #[allow(unused_imports)]
 use log::{debug, error, info, trace, warn};
 use md5::{Digest, Md5};
@@ -69,8 +69,14 @@ impl Buffer {
 /// Get all checksums and send the results through a channel.
 fn get_checksums(files: Vec<PathBuf>, tx: Sender<(PathBuf, Result<Md5>)>) -> Result<()> {
     // Set up shared state that's applicable to all individual reads or for choosing what to read:
-    let mut shared_buffers: [Option<Buffer>; RING_SIZE] = [NO_BUFFER; RING_SIZE];
     let mut ring = IoUring::new(RING_SIZE as u32)?;
+    let mut probe = Probe::new();
+    ring.submitter().register_probe(&mut probe)?;
+    if !probe.is_supported(opcode::Read::CODE) {
+        panic!("Reading files is not supported. Try a newer kernel.");
+    }
+
+    let mut shared_buffers: [Option<Buffer>; RING_SIZE] = [NO_BUFFER; RING_SIZE];
     let mut files = files.into_iter().peekable();
     let mut free_index_list: Vec<_> = (0..RING_SIZE).into_iter().collect();
 
