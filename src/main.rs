@@ -72,18 +72,13 @@ fn get_checksums(files: Vec<PathBuf>, tx: Sender<(PathBuf, Result<Md5>)>) -> Res
     let mut shared_buffers: [Option<Buffer>; RING_SIZE] = [NO_BUFFER; RING_SIZE];
     let mut ring = IoUring::new(RING_SIZE as u32)?;
     let mut files = files.into_iter().peekable();
+    let mut free_index_list: Vec<_> = (0..RING_SIZE).into_iter().collect();
 
     loop {
         let mut new_work_queued = false;
 
         // Only proceed if there's both a free index and a file:
-        // TODO: manually queue free indices
-        while let Some(free_idx) = shared_buffers
-            .iter()
-            .enumerate()
-            .filter_map(|(idx, elem)| if elem.is_none() { Some(idx) } else { None })
-            .next()
-        {
+        while let Some(free_idx) = free_index_list.pop() {
             debug_assert!(
                 !ring.submission().is_full(),
                 "Submission queue must have a free spot if there's a free shared buffer",
@@ -91,9 +86,11 @@ fn get_checksums(files: Vec<PathBuf>, tx: Sender<(PathBuf, Result<Md5>)>) -> Res
 
             if let Some(ref path) = files.next() {
                 // Queue a read with this file:
-                let partial_buffer = match Buffer::new(path) {
-                    Ok(partial_buffer) => partial_buffer,
+                let buffer = match Buffer::new(path) {
+                    Ok(buffer) => buffer,
                     Err(err) => {
+                        // We didn't use this buffer index
+                        free_index_list.push(free_idx);
                         tx.send((path.to_owned(), Err(err))).unwrap();
                         continue;
                     }
@@ -101,34 +98,54 @@ fn get_checksums(files: Vec<PathBuf>, tx: Sender<(PathBuf, Result<Md5>)>) -> Res
 
                 // Put the buffer into the array so it will have a constant location until it's removed
                 // after being populated:
-                shared_buffers[free_idx].replace(partial_buffer);
-                // TODO: write this more nicely, testing that there is no move.
+                shared_buffers[free_idx].replace(buffer);
+                debug_assert_eq!(
+                    free_index_list.len(),
+                    shared_buffers.iter().filter(|elem| elem.is_none()).count(),
+                    "The free index list is out of sync with the work buffers (1)"
+                );
                 let buffer_ref = shared_buffers[free_idx].as_mut().unwrap();
-                submit_for_read(&mut ring, buffer_ref, free_idx);
-
                 new_work_queued = true;
+                submit_for_read(&mut ring, buffer_ref, free_idx);
             } else {
+                // We didn't use this buffer index
+                free_index_list.push(free_idx);
                 break;
             }
         }
 
         if new_work_queued || files.peek().is_some() {
             if files.peek().is_some() {
-                debug_assert!(
-                    shared_buffers.iter().all(|elem| elem.is_some()),
+                debug_assert_eq!(
+                    free_index_list.len(),
+                    0,
                     "We should have filled all the slots"
-                )
+                );
             }
 
             // Wait for a result since the jobs list is full or we just added something
             trace!("Waiting for / handling a result");
-            submit_wait_and_handle_result(&mut ring, &mut shared_buffers, &tx)?;
+            submit_wait_and_handle_result(
+                &mut ring,
+                &mut shared_buffers,
+                &tx,
+                &mut free_index_list,
+            )?;
         } else {
             // There's no more work that can be added right now, but we still need to handle any
             // active buffers
-            while shared_buffers.iter().any(|elem| elem.is_some()) {
-                trace!("Did not submit work, waiting for old work");
-                submit_wait_and_handle_result(&mut ring, &mut shared_buffers, &tx)?;
+            while free_index_list.len() < RING_SIZE {
+                trace!(
+                    "Did not submit work, waiting for old work. {}/{} free indices",
+                    free_index_list.len(),
+                    RING_SIZE
+                );
+                submit_wait_and_handle_result(
+                    &mut ring,
+                    &mut shared_buffers,
+                    &tx,
+                    &mut free_index_list,
+                )?;
             }
             break;
         }
@@ -141,7 +158,14 @@ fn submit_wait_and_handle_result(
     ring: &mut IoUring,
     shared_buffers: &mut [Option<Buffer>; RING_SIZE],
     tx: &Sender<(PathBuf, Result<md5::Md5, anyhow::Error>)>,
+    free_index_list: &mut Vec<usize>,
 ) -> Result<()> {
+    debug_assert_eq!(
+        free_index_list.len(),
+        shared_buffers.iter().filter(|elem| elem.is_none()).count(),
+        "The free index list is out of sync with the work buffers (2)"
+    );
+
     ring.submit_and_wait(1)?;
     let completed_idx = ring
         .completion()
@@ -167,6 +191,12 @@ fn submit_wait_and_handle_result(
     if buffer.buf.len() == 0 {
         // It's finished, so free the slot (and get an owned object):
         let buffer = shared_buffers[completed_idx].take().unwrap();
+        free_index_list.push(completed_idx);
+        debug_assert_eq!(
+            free_index_list.len(),
+            shared_buffers.iter().filter(|elem| elem.is_none()).count(),
+            "The free index list is out of sync with the work buffers (3)"
+        );
         tx.send((buffer.path, Ok(buffer.ctx))).unwrap();
     } else {
         trace!("Checksum not finished, resubmitting for read");
