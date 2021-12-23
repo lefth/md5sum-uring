@@ -26,8 +26,25 @@ suffers on large files.
 This demo does not yet use any of io_uring's advanced features, such as the submission queue, fixed
 buffers, or `O_DIRECT` with data alignment.
 
-#### Compatibility:
-This demo does not yet probe to check which io_uring features are supported on the current kernel.
+#### USAGE:
+```
+    md5sum-uring [FLAGS] [files]...
+```
+
+#### FLAGS:
+```
+    -h, --help                 Prints help information
+        --no-uring             Compute checksums without the io_uring feature
+        --preregister-files    Use the io_uring feature of pre-registering files to be read before the read is requested
+        --use-fixed-buffers    Use the io_uring feature of reading into fixed position buffers. (not
+                               implemented)
+    -V, --version              Prints version information
+```
+
+#### ARGS:
+```
+    <files>...
+```
 
 
 <!-- vim: textwidth=106 expandtab: -->

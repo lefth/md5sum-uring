@@ -1,28 +1,21 @@
+/// This module pre-registers files with io_uring before the reads start.
 use std::{
     cmp::min,
     fs::File,
     os::unix::io::AsRawFd,
     path::{Path, PathBuf},
-    sync::mpsc::{channel, Sender},
-    thread,
+    sync::mpsc::Sender,
 };
 
-use anyhow::Result;
+use anyhow::{bail, Result};
 use io_uring::{opcode, types, IoUring, Probe};
 #[allow(unused_imports)]
 use log::{debug, error, info, trace, warn};
 use md5::{Digest, Md5};
-use structopt::StructOpt;
 
-const RING_SIZE: usize = 16;
-const NO_BUFFER: Option<Buffer> = None;
-const MAX_READ_SIZE: usize = 4096 * 16;
+use crate::*;
 
-#[derive(StructOpt)]
-struct Opt {
-    #[structopt()]
-    pub files: Vec<PathBuf>,
-}
+const BUFFER_NONE: Option<Buffer> = None;
 
 /// This struct holds the state and buffers of a file that's being read, particularly
 /// when one read finishes but more reads are required to finish the file.
@@ -69,21 +62,21 @@ impl Buffer {
 }
 
 /// Get all checksums and send the results through a channel.
-fn get_checksums(files: Vec<PathBuf>, tx: Sender<(PathBuf, Result<Md5>)>) -> Result<()> {
+pub fn get_checksums(files: Vec<PathBuf>, tx: Sender<(PathBuf, Result<Md5>)>) -> Result<()> {
     // Set up shared state that's applicable to all individual reads or for choosing what to read:
     let mut ring = IoUring::new(RING_SIZE as u32)?;
     let mut probe = Probe::new();
     ring.submitter().register_probe(&mut probe)?;
     if !probe.is_supported(opcode::Read::CODE) {
-        panic!("Reading files is not supported. Try a newer kernel.");
+        bail!("Reading files is not supported. Try a newer kernel.");
     }
-    // XXX: opcode::sys::IORING_REGISTER_FILES is private:
+    // opcode::sys::IORING_REGISTER_FILES is private, so just use its number "2"
     if !probe.is_supported(2) {
-        panic!("Registering files is not supported. Try a newer kernel.");
+        bail!("Registering files is not supported. Try a newer kernel.");
     }
 
     let mut file_idx = 0;
-    let mut shared_buffers: [Option<Buffer>; RING_SIZE] = [NO_BUFFER; RING_SIZE];
+    let mut shared_buffers: [Option<Buffer>; RING_SIZE] = [BUFFER_NONE; RING_SIZE];
     let mut free_index_list: Vec<_> = (0..RING_SIZE).into_iter().collect();
     let mut raw_fds = Vec::new();
     let mut files = files
@@ -249,4 +242,3 @@ fn submit_for_read(ring: &mut IoUring, buffer_ref: &mut Buffer, idx: usize) {
             .expect("submission queue is full");
     }
 }
-
