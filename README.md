@@ -5,7 +5,7 @@ to read multiple files in Rust. At time of writing, that library's example scrip
 single-file examples, and the purpose of io-uring is to read many files.
 
 #### Installation:
-Since io-uring is a kernel feature, md5sum-uring only works on recent Linux
+Since io-uring is a kernel feature, md5sum-uring only works on Linux or WSL2
 running a somewhat recent kernel. Install with cargo:
 ```
 cargo install --git https://github.com/lefth/md5sum-uring
@@ -23,9 +23,6 @@ When run on many small files, this implementation runs faster than the naive rus
 exception: this program runs at least 3x faster than the official md5sum binary. However performance
 suffers on large files.
 
-This demo does not yet use any of io_uring's advanced features, such as the submission queue, fixed
-buffers, or `O_DIRECT` with data alignment.
-
 #### USAGE:
 ```
     md5sum-uring [FLAGS] [files]...
@@ -36,8 +33,7 @@ buffers, or `O_DIRECT` with data alignment.
     -h, --help                 Prints help information
         --no-uring             Compute checksums without the io_uring feature
         --preregister-files    Use the io_uring feature of pre-registering files to be read before the read is requested
-        --use-fixed-buffers    Use the io_uring feature of reading into fixed position buffers. (not
-                               implemented)
+        --use-fixed-buffers    Use the io_uring feature of reading into fixed position buffers
     -V, --version              Prints version information
 ```
 
@@ -45,6 +41,9 @@ buffers, or `O_DIRECT` with data alignment.
 ```
     <files>...
 ```
+
+#### Limitations:
+Registering fixed buffers requires root permissions.
 
 
 <!-- vim: textwidth=106 expandtab: -->

@@ -21,7 +21,7 @@ pub struct Opt {
     #[structopt(long)]
     pub preregister_files: bool,
 
-    /// Use the io_uring feature of reading into fixed position buffers. (not implemented)
+    /// Use the io_uring feature of reading into fixed position buffers.
     #[structopt(long)]
     pub use_fixed_buffers: bool,
 
