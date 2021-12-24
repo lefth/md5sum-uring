@@ -32,7 +32,8 @@ suffers on large files.
 ```
     -h, --help                 Prints help information
         --no-uring             Compute checksums without the io_uring feature
-        --preregister-files    Use the io_uring feature of pre-registering files to be read before the read is requested
+        --o-direct             Open files with the O_DIRECT flag for performance
+        --pre-register-files   Use the io_uring feature of pre-registering files to be read before the read is requested
         --use-fixed-buffers    Use the io_uring feature of reading into fixed position buffers
     -V, --version              Prints version information
 ```

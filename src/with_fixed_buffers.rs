@@ -1,8 +1,9 @@
 /// This module pre-registers files and buffers with io_uring before the reads start.
 use std::{
-    cell::{RefCell, RefMut},
+    cell::RefCell,
     cmp::min,
     fs::File,
+    ops::{Deref, DerefMut},
     os::unix::io::AsRawFd,
     path::{Path, PathBuf},
     sync::{mpsc::Sender, Arc},
@@ -18,6 +19,24 @@ use crate::*;
 
 const READSTATE_NONE: Option<ReadState> = None;
 
+#[repr(C, align(4096))]
+#[derive(std::fmt::Debug)]
+struct AlignedBuffer(pub [u8; MAX_READ_SIZE]);
+
+impl Deref for AlignedBuffer {
+    type Target = [u8];
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl DerefMut for AlignedBuffer {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
 /// This struct holds the state of a file that's being read, particularly
 /// when one read finishes but more reads are required to finish the file.
 /// This struct is called "Buffer" in other modules, but in this case the buffer
@@ -31,13 +50,14 @@ struct ReadState {
     /// The md5 state is updated as more bytes are read
     ctx: Md5,
     pub file_idx: u32,
-    pub buf: Option<Arc<RefCell<Vec<u8>>>>,
+    pub buf: Option<Arc<RefCell<AlignedBuffer>>>,
     pub buf_idx: Option<u16>,
+    pub buffer_len: usize,
 }
 
 impl ReadState {
-    pub fn new(path: &Path, file_idx: u32) -> Result<ReadState> {
-        let fd = File::open(path)?;
+    pub fn new(path: &Path, file_idx: u32, o_direct: bool) -> Result<ReadState> {
+        let fd = open(path, o_direct)?;
         let file_len = fd.metadata()?.len();
         Ok(ReadState {
             path: path.to_owned(),
@@ -48,22 +68,20 @@ impl ReadState {
             file_idx,
             buf: None,
             buf_idx: None,
+            buffer_len: 0,
         })
     }
 
     /// Get ready to read file data into a buffer.
-    fn initialize(&mut self, buf: Arc<RefCell<Vec<u8>>>, buf_idx: u16) {
+    fn initialize(&mut self, buf: Arc<RefCell<AlignedBuffer>>, buf_idx: u16) {
         self.buf_idx.replace(buf_idx);
-        {
-            let mut buf = buf.borrow_mut();
-            self.set_buffer_size(&mut buf);
-        }
+        self.set_buffer_size();
         self.buf.replace(buf);
     }
 
     /// Reset the buffer size, useful whenever the read position changes.
     /// Returns whether the file has been fully read.
-    pub fn set_buffer_size(&mut self, buf: &mut RefMut<Vec<u8>>) -> bool {
+    pub fn set_buffer_size(&mut self) -> bool {
         let needed_bytes = min(self.file_len as usize - self.position, MAX_READ_SIZE);
         trace!(
             "Set the buffer size to {} because we read {} of a {} byte file.",
@@ -71,28 +89,29 @@ impl ReadState {
             self.position,
             self.file_len
         );
-        buf.resize(needed_bytes, 0);
+        self.buffer_len = needed_bytes;
 
         needed_bytes == 0
     }
 
     /// Returns whether the file has been fully read.
     pub(crate) fn update(&mut self) -> bool {
-        let buf = self.buf.take().unwrap();
-        let finished = {
-            let mut buf = buf.borrow_mut();
-            self.ctx.update(&buf[..]);
-            self.position += buf.len();
-            self.set_buffer_size(&mut buf)
-        };
-        self.buf.replace(buf);
+        let buf = self.buf.as_ref().unwrap().borrow();
+        self.ctx.update(&buf[..self.buffer_len]);
+        self.position += self.buffer_len;
+        drop(buf);
+        let finished = self.set_buffer_size();
 
         finished
     }
 }
 
 /// Get all checksums and send the results through a channel.
-pub fn get_checksums(files: Vec<PathBuf>, tx: Sender<(PathBuf, Result<Md5>)>) -> Result<()> {
+pub fn get_checksums(
+    files: Vec<PathBuf>,
+    tx: Sender<(PathBuf, Result<Md5>)>,
+    o_direct: bool,
+) -> Result<()> {
     // Set up shared state that's applicable to all individual reads or for choosing what to read:
     let mut ring = IoUring::new(RING_SIZE as u32)?;
     let mut probe = Probe::new();
@@ -110,8 +129,8 @@ pub fn get_checksums(files: Vec<PathBuf>, tx: Sender<(PathBuf, Result<Md5>)>) ->
 
     let mut file_idx = 0;
     let mut read_states: [Option<ReadState>; RING_SIZE] = [READSTATE_NONE; RING_SIZE];
-    let shared_buffers: [Arc<RefCell<Vec<u8>>>; RING_SIZE] = (0..RING_SIZE)
-        .map(|_| Arc::new(RefCell::new(vec![0u8; MAX_READ_SIZE])))
+    let shared_buffers: [Arc<RefCell<AlignedBuffer>>; RING_SIZE] = (0..RING_SIZE)
+        .map(|_| Arc::new(RefCell::new(AlignedBuffer([0u8; MAX_READ_SIZE]))))
         .collect::<Vec<_>>()
         .try_into()
         .unwrap();
@@ -119,7 +138,7 @@ pub fn get_checksums(files: Vec<PathBuf>, tx: Sender<(PathBuf, Result<Md5>)>) ->
     let mut raw_fds = Vec::new();
     let mut files = files
         .into_iter()
-        .filter_map(|path| match ReadState::new(&path, file_idx) {
+        .filter_map(|path| match ReadState::new(&path, file_idx, o_direct) {
             Ok(buffer) => {
                 file_idx += 1;
                 raw_fds.push(buffer.fd.as_raw_fd());

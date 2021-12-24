@@ -32,8 +32,8 @@ struct Buffer {
 }
 
 impl Buffer {
-    pub fn new(path: &Path, file_idx: u32) -> Result<Buffer> {
-        let fd = File::open(path)?;
+    pub fn new(path: &Path, file_idx: u32, o_direct: bool) -> Result<Buffer> {
+        let fd = open(path, o_direct)?;
         let file_len = fd.metadata()?.len();
         let mut ret = Buffer {
             path: path.to_owned(),
@@ -62,7 +62,11 @@ impl Buffer {
 }
 
 /// Get all checksums and send the results through a channel.
-pub fn get_checksums(files: Vec<PathBuf>, tx: Sender<(PathBuf, Result<Md5>)>) -> Result<()> {
+pub fn get_checksums(
+    files: Vec<PathBuf>,
+    tx: Sender<(PathBuf, Result<Md5>)>,
+    o_direct: bool,
+) -> Result<()> {
     // Set up shared state that's applicable to all individual reads or for choosing what to read:
     let mut ring = IoUring::new(RING_SIZE as u32)?;
     let mut probe = Probe::new();
@@ -81,7 +85,7 @@ pub fn get_checksums(files: Vec<PathBuf>, tx: Sender<(PathBuf, Result<Md5>)>) ->
     let mut raw_fds = Vec::new();
     let mut files = files
         .into_iter()
-        .filter_map(|path| match Buffer::new(&path, file_idx) {
+        .filter_map(|path| match Buffer::new(&path, file_idx, o_direct) {
             Ok(buffer) => {
                 file_idx += 1;
                 raw_fds.push(buffer.fd.as_raw_fd());
