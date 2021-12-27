@@ -3,7 +3,6 @@ use std::{
     cell::RefCell,
     cmp::min,
     fs::File,
-    ops::{Deref, DerefMut},
     os::unix::io::AsRawFd,
     path::{Path, PathBuf},
     sync::{mpsc::Sender, Arc},
@@ -19,24 +18,6 @@ use crate::*;
 
 const READSTATE_NONE: Option<ReadState> = None;
 
-#[repr(C, align(4096))]
-#[derive(std::fmt::Debug)]
-struct AlignedBuffer(pub [u8; MAX_READ_SIZE]);
-
-impl Deref for AlignedBuffer {
-    type Target = [u8];
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
-
-impl DerefMut for AlignedBuffer {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.0
-    }
-}
-
 /// This struct holds the state of a file that's being read, particularly
 /// when one read finishes but more reads are required to finish the file.
 /// This struct is called "Buffer" in other modules, but in this case the buffer
@@ -46,13 +27,12 @@ struct ReadState {
     pub fd: File,
     file_len: u64,
     /// How many bytes have been read
-    pub position: usize,
+    pub position: u64,
     /// The md5 state is updated as more bytes are read
     ctx: Md5,
     pub file_idx: u32,
     pub buf: Option<Arc<RefCell<AlignedBuffer>>>,
     pub buf_idx: Option<u16>,
-    pub buffer_len: usize,
 }
 
 impl ReadState {
@@ -68,39 +48,37 @@ impl ReadState {
             file_idx,
             buf: None,
             buf_idx: None,
-            buffer_len: 0,
         })
     }
 
     /// Get ready to read file data into a buffer.
     fn initialize(&mut self, buf: Arc<RefCell<AlignedBuffer>>, buf_idx: u16) {
         self.buf_idx.replace(buf_idx);
-        self.set_buffer_size();
+        Self::set_buffer_size(&mut *buf.borrow_mut(), self.file_len, self.position);
         self.buf.replace(buf);
     }
 
     /// Reset the buffer size, useful whenever the read position changes.
     /// Returns whether the file has been fully read.
-    pub fn set_buffer_size(&mut self) -> bool {
-        let needed_bytes = min(self.file_len as usize - self.position, MAX_READ_SIZE);
+    pub fn set_buffer_size(buf: &mut AlignedBuffer, file_len: u64, position: u64) -> bool {
+        let needed_bytes = min(file_len - position, MAX_READ_SIZE as u64);
         trace!(
             "Set the buffer size to {} because we read {} of a {} byte file.",
             needed_bytes,
-            self.position,
-            self.file_len
+            position,
+            file_len
         );
-        self.buffer_len = needed_bytes;
+        buf.resize(needed_bytes as usize);
 
         needed_bytes == 0
     }
 
     /// Returns whether the file has been fully read.
     pub(crate) fn update(&mut self) -> bool {
-        let buf = self.buf.as_ref().unwrap().borrow();
-        self.ctx.update(&buf[..self.buffer_len]);
-        self.position += self.buffer_len;
-        drop(buf);
-        let finished = self.set_buffer_size();
+        let mut buf = self.buf.as_ref().unwrap().borrow_mut();
+        self.ctx.update(&*buf);
+        self.position += buf.len() as u64;
+        let finished = Self::set_buffer_size(&mut buf, self.file_len, self.position);
 
         finished
     }
@@ -130,7 +108,7 @@ pub fn get_checksums(
     let mut file_idx = 0;
     let mut read_states: [Option<ReadState>; RING_SIZE] = [READSTATE_NONE; RING_SIZE];
     let shared_buffers: [Arc<RefCell<AlignedBuffer>>; RING_SIZE] = (0..RING_SIZE)
-        .map(|_| Arc::new(RefCell::new(AlignedBuffer([0u8; MAX_READ_SIZE]))))
+        .map(|_| Default::default())
         .collect::<Vec<_>>()
         .try_into()
         .unwrap();

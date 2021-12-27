@@ -23,9 +23,9 @@ struct Buffer {
     pub path: PathBuf,
     pub fd: File,
     file_len: u64,
-    pub buf: Vec<u8>,
+    pub buf: Box<AlignedBuffer>,
     /// How many bytes have been read
-    pub position: usize,
+    pub position: u64,
     /// The md5 state is updated as more bytes are read
     ctx: Md5,
     pub file_idx: u32,
@@ -39,7 +39,7 @@ impl Buffer {
             path: path.to_owned(),
             fd,
             file_len,
-            buf: Vec::new(),
+            buf: Default::default(),
             position: 0,
             ctx: Md5::new(),
             file_idx,
@@ -50,14 +50,14 @@ impl Buffer {
 
     /// Reset the buffer size, useful whenever the read position changes.
     pub fn set_buffer_size(&mut self) {
-        let needed_bytes = min(self.file_len as usize - self.position, MAX_READ_SIZE);
+        let needed_bytes = min(self.file_len - self.position, MAX_READ_SIZE as u64);
         trace!(
             "Set the buffer size to {} because we read {} of a {} byte file.",
             needed_bytes,
             self.position,
             self.file_len
         );
-        self.buf.resize(needed_bytes, 0);
+        self.buf.resize(needed_bytes as usize);
     }
 }
 
@@ -194,7 +194,7 @@ fn submit_wait_and_handle_result(
         .as_mut()
         .expect("should exist because we chose its index");
 
-    buffer.position += buffer.buf.len();
+    buffer.position += buffer.buf.len() as u64;
 
     trace!(
         "Incorporating {} bytes into checksum. Finished?: {} ({:?})",
@@ -202,7 +202,7 @@ fn submit_wait_and_handle_result(
         buffer.position as u64 + buffer.buf.len() as u64 == buffer.file_len,
         &buffer.path,
     );
-    buffer.ctx.update(&buffer.buf);
+    buffer.ctx.update(&*buffer.buf);
     buffer.set_buffer_size();
     if buffer.buf.len() == 0 {
         // It's finished, so free the slot (and get an owned object):

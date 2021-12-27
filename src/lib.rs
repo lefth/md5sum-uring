@@ -1,7 +1,9 @@
 use std::{
     fs::{File, OpenOptions},
+    ops::{Deref, DerefMut},
     os::unix::prelude::OpenOptionsExt,
     path::{Path, PathBuf},
+    slice,
 };
 
 #[allow(unused_imports)]
@@ -37,6 +39,66 @@ pub struct Opt {
     /// Open files with the O_DIRECT flag for performance.
     #[structopt(long)]
     pub o_direct: bool,
+}
+
+#[repr(C, align(4096))]
+#[derive(std::fmt::Debug)]
+/// Aligned buffer. Put this in a box to avoid overfilling the stack.
+pub struct AlignedBuffer {
+    buf: [u8; MAX_READ_SIZE],
+    len: usize,
+}
+
+impl AlignedBuffer {
+    pub fn new() -> AlignedBuffer {
+        AlignedBuffer {
+            buf: [0u8; MAX_READ_SIZE],
+            len: MAX_READ_SIZE,
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
+    /// Panics if the size is over the capacity (the default size).
+    pub fn resize(&mut self, len: usize) {
+        assert!(
+            len <= MAX_READ_SIZE,
+            "Cannot resize buffer to {} bytes--larger than the full allocated region: {}",
+            len,
+            MAX_READ_SIZE
+        );
+        self.len = len;
+    }
+}
+
+impl Default for AlignedBuffer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl AsRef<[u8]> for AlignedBuffer {
+    fn as_ref(&self) -> &[u8] {
+        &self.buf[0..self.len]
+    }
+}
+
+impl Deref for AlignedBuffer {
+    type Target = [u8];
+
+    fn deref(&self) -> &Self::Target {
+        // unsafe: copied from Vec for performance:
+        unsafe { slice::from_raw_parts(self.buf.as_ptr(), self.len) }
+    }
+}
+
+impl DerefMut for AlignedBuffer {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        // unsafe: copied from Vec for performance:
+        unsafe { slice::from_raw_parts_mut(self.buf.as_mut_ptr(), self.len) }
+    }
 }
 
 /// Open a file for reading.
