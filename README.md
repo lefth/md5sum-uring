@@ -4,6 +4,8 @@ This program is written as an example of how to use [io-uring](https://docs.rs/i
 to read multiple files in Rust. At time of writing, that library's example scripts only show
 single-file examples, and the purpose of io-uring is to read many files.
 
+Warning: I am debugging issues. Run the relevant test before using one of these examples in your own code.
+
 #### Installation:
 Since io-uring is a kernel feature, md5sum-uring only works on Linux or WSL2
 running a somewhat recent kernel. Install with cargo:
@@ -15,13 +17,13 @@ This project isn't intended to replace your system md5sum, so none of md5sum's f
 #### Performance:
 Performance testing should be done without files in cache:
 ```
-sync; echo 1 | sudo tee /proc/sys/vm/drop_caches; time md5sum-uring files/*
-sync; echo 1 | sudo tee /proc/sys/vm/drop_caches; time md5sum files/*
+sync; echo 3 | sudo tee /proc/sys/vm/drop_caches; time md5sum-uring files/*
+sync; echo 3 | sudo tee /proc/sys/vm/drop_caches; time md5sum files/*
 ```
 When run on many small files, this implementation runs faster than the naive rust implementation of md5sum
-(see the first commit), and about thes same speed as the official md5sum binary. WSL2 seems to be an
-exception: this program runs at least 3x faster than the official md5sum binary. However performance
-suffers on large files.
+(run with --no-uring), and about the same speed as the official md5sum binary. WSL2 seems to be an
+exception: this program runs at least 3x faster than the official md5sum binary. In other situations, the
+performance is comparable.
 
 #### USAGE:
 ```
@@ -44,7 +46,12 @@ suffers on large files.
 ```
 
 #### Limitations:
-Registering fixed buffers requires root permissions.
+Registering fixed buffers requires root permissions. To run the fixed buffer tests with root permissions:
+```
+CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER='sudo -E' cargo test test_fixed_buffers
+CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER='sudo -E' cargo test test_fixed_buffers_o_direct
+```
+(Replace "X86_64_UNKNOWN_LINUX_GNU" with your current platform if needed).
 
 
 <!-- vim: textwidth=106 expandtab: -->
