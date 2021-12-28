@@ -17,6 +17,7 @@ pub mod without_uring;
 
 pub const RING_SIZE: usize = 16;
 pub const MAX_READ_SIZE: usize = 4096 * 16;
+pub const ALIGNMENT: usize = 4096;
 
 #[derive(StructOpt)]
 pub struct Opt {
@@ -46,6 +47,7 @@ pub struct Opt {
 /// Aligned buffer. Put this in a box to avoid overfilling the stack.
 pub struct AlignedBuffer {
     buf: [u8; MAX_READ_SIZE],
+    // A lot of space is wasted by storing such a small value with 4096 byte alignment:
     len: usize,
 }
 
@@ -101,8 +103,9 @@ impl DerefMut for AlignedBuffer {
     }
 }
 
-/// Open a file for reading.
-pub fn open(path: &Path, o_direct: bool) -> std::io::Result<File> {
+/// Open a file for reading. Note that O_DIRECT seems not to work on some systems like
+/// WSL2.
+pub fn open(path: impl AsRef<Path>, o_direct: bool) -> std::io::Result<File> {
     if o_direct {
         OpenOptions::new()
             .read(true)
@@ -118,7 +121,8 @@ pub fn open(path: &Path, o_direct: bool) -> std::io::Result<File> {
 mod tests {
     use std::{
         collections::HashMap,
-        io::Write,
+        io::{Read, Write},
+        mem::align_of,
         path::PathBuf,
         sync::{
             mpsc::{channel, Sender},
@@ -130,11 +134,12 @@ mod tests {
     #[allow(unused_imports)]
     use log::{debug, error, info, trace, warn};
     use md5::{Digest, Md5};
-    use structopt::StructOpt;
     use structopt::lazy_static::lazy_static;
+    use structopt::StructOpt;
 
     use crate::{
-        simple_uring, with_fixed_buffers, with_register_files, without_uring, Opt, MAX_READ_SIZE,
+        open, simple_uring, with_fixed_buffers, with_register_files, without_uring, AlignedBuffer,
+        Opt, ALIGNMENT, MAX_READ_SIZE,
     };
 
     fn setup() {
@@ -268,6 +273,24 @@ mod tests {
     }
 
     #[test]
+    fn test_simplest_o_direct() -> Result<()> {
+        setup();
+        let _ = file_setup()?;
+        let len = 25;
+        let expected_contents = "0000000000111111111122222";
+
+        let mut file = open("test/file-25", true)?;
+        let mut buf: Box<AlignedBuffer> = Default::default();
+        buf.resize(len);
+        file.read_exact(&mut buf)?;
+        let data = String::from_utf8_lossy(&buf);
+        trace!("Read file: {}", data);
+        assert_eq!(data, expected_contents);
+
+        Ok(())
+    }
+
+    #[test]
     fn test_arguments() {
         setup();
 
@@ -277,6 +300,26 @@ mod tests {
                 Err(_)
             ),
             "--o-direct and --no-uring should be an illegal combination."
+        );
+    }
+
+    #[test]
+    fn test_alignment() {
+        setup();
+        let mut buf = Box::new(AlignedBuffer::new());
+        let ptr = buf.as_mut_ptr();
+        assert_eq!(ptr as usize % ALIGNMENT, 0);
+
+        let mut buf = Box::pin(AlignedBuffer::new());
+        let ptr = buf.as_mut_ptr();
+        assert_eq!(ptr as usize % ALIGNMENT, 0);
+
+        assert_eq!(
+            align_of::<AlignedBuffer>(),
+            ALIGNMENT,
+            "Aligned buffer size is {}, should be {}.",
+            align_of::<AlignedBuffer>(),
+            ALIGNMENT
         );
     }
 }
