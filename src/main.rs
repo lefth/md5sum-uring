@@ -22,10 +22,7 @@ fn main() -> Result<()> {
 
     let handle = thread::spawn(move || {
         if options.no_uring {
-            if options.o_direct {
-                warn!("Using o_direct without io_uring is not supported.");
-            }
-            without_uring::get_checksums(options.files, tx)
+            without_uring::get_checksums(options.files, tx, options.o_direct)
         } else if options.use_fixed_buffers {
             if !options.pre_register_files {
                 warn!("Fixed buffers without preregistered files is not implemented. Using preregistered files.");
