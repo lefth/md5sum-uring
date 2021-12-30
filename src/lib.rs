@@ -31,7 +31,7 @@ pub struct Opt {
     pub use_fixed_buffers: bool,
 
     /// Compute checksums without the io_uring feature.
-    #[structopt(long, conflicts_with_all = &["preregister_files", "use_fixed_buffers", "o_direct"])]
+    #[structopt(long, conflicts_with_all = &["preregister-files", "use-fixed-buffers", "o-direct"])]
     pub no_uring: bool,
 
     /// Open files with the O_DIRECT flag for performance.
@@ -65,9 +65,10 @@ mod tests {
     #[allow(unused_imports)]
     use log::{debug, error, info, trace, warn};
     use md5::{Digest, Md5};
+    use structopt::StructOpt;
 
     use crate::{
-        simple_uring, with_fixed_buffers, with_register_files, without_uring, MAX_READ_SIZE,
+        simple_uring, with_fixed_buffers, with_register_files, without_uring, Opt, MAX_READ_SIZE,
     };
 
     fn setup() {
@@ -146,13 +147,6 @@ mod tests {
     }
 
     #[test]
-    fn test_without_uring_o_direct() -> Result<()> {
-        setup();
-        assert_checksums(without_uring::get_checksums, true)?;
-        Ok(())
-    }
-
-    #[test]
     fn test_simple_uring() -> Result<()> {
         setup();
         assert_checksums(simple_uring::get_checksums, false)?;
@@ -192,5 +186,18 @@ mod tests {
         setup();
         assert_checksums(with_fixed_buffers::get_checksums, true)?;
         Ok(())
+    }
+
+    #[test]
+    fn test_arguments() {
+        setup();
+
+        assert!(
+            matches!(
+                Opt::from_iter_safe(&["", "--o-direct", "--no-uring"]),
+                Err(_)
+            ),
+            "--o-direct and --no-uring should be an illegal combination."
+        );
     }
 }
