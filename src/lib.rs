@@ -62,11 +62,18 @@ mod tests {
     };
 
     use anyhow::Result;
+    #[allow(unused_imports)]
+    use log::{debug, error, info, trace, warn};
     use md5::{Digest, Md5};
 
     use crate::{
         simple_uring, with_fixed_buffers, with_register_files, without_uring, MAX_READ_SIZE,
     };
+
+    fn setup() {
+        // Try init because multiple tests may invoke this:
+        let _ = env_logger::try_init();
+    }
 
     fn file_setup() -> Result<HashMap<PathBuf, [u8; 16]>> {
         match std::fs::create_dir("test") {
@@ -114,12 +121,16 @@ mod tests {
 
         let (tx, rx) = channel();
         crossbeam::scope(|s| -> Result<()> {
-            s.spawn(|_| get_checksums(checksums.keys().cloned().collect(), tx, o_direct));
+            let handle = s.spawn(|_| -> Result<()> {
+                get_checksums(checksums.keys().cloned().collect(), tx, o_direct)?;
+                Ok(())
+            });
 
             for (path, result) in rx {
                 let checksum: [u8; 16] = result?.finalize().try_into()?;
                 assert_eq!(checksums.get(&path).unwrap(), &checksum);
             }
+            handle.join().unwrap()?;
             Ok(())
         })
         .unwrap()?;
@@ -129,48 +140,56 @@ mod tests {
 
     #[test]
     fn test_without_uring() -> Result<()> {
+        setup();
         assert_checksums(without_uring::get_checksums, false)?;
         Ok(())
     }
 
     #[test]
     fn test_without_uring_o_direct() -> Result<()> {
+        setup();
         assert_checksums(without_uring::get_checksums, true)?;
         Ok(())
     }
 
     #[test]
     fn test_simple_uring() -> Result<()> {
+        setup();
         assert_checksums(simple_uring::get_checksums, false)?;
         Ok(())
     }
 
     #[test]
     fn test_simple_uring_o_direct() -> Result<()> {
+        setup();
         assert_checksums(simple_uring::get_checksums, true)?;
         Ok(())
     }
 
     #[test]
     fn test_preregistered_files() -> Result<()> {
+        setup();
         assert_checksums(with_register_files::get_checksums, false)?;
         Ok(())
     }
 
     #[test]
     fn test_preregistered_files_o_direct() -> Result<()> {
+        setup();
         assert_checksums(with_register_files::get_checksums, true)?;
         Ok(())
     }
 
     #[test]
     fn test_fixed_buffers() -> Result<()> {
+        setup();
         assert_checksums(with_fixed_buffers::get_checksums, false)?;
         Ok(())
     }
 
     #[test]
     fn test_fixed_buffers_o_direct() -> Result<()> {
+        setup();
         assert_checksums(with_fixed_buffers::get_checksums, true)?;
         Ok(())
     }
