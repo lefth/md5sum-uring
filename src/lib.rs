@@ -58,7 +58,10 @@ mod tests {
         collections::HashMap,
         io::Write,
         path::PathBuf,
-        sync::mpsc::{channel, Sender},
+        sync::{
+            mpsc::{channel, Sender},
+            Mutex,
+        },
     };
 
     use anyhow::Result;
@@ -66,6 +69,7 @@ mod tests {
     use log::{debug, error, info, trace, warn};
     use md5::{Digest, Md5};
     use structopt::StructOpt;
+    use structopt::lazy_static::lazy_static;
 
     use crate::{
         simple_uring, with_fixed_buffers, with_register_files, without_uring, Opt, MAX_READ_SIZE,
@@ -77,6 +81,20 @@ mod tests {
     }
 
     fn file_setup() -> Result<HashMap<PathBuf, [u8; 16]>> {
+        lazy_static! {
+            static ref CHECKSUMS: Mutex<HashMap<PathBuf, [u8; 16]>> = Default::default();
+        };
+
+        let mut mutex_guard = CHECKSUMS.lock().unwrap();
+
+        setup();
+
+        let checksums: &mut HashMap<_, _> = &mut mutex_guard;
+        if checksums.len() > 0 {
+            // Don't create/modify the files twice
+            return Ok(checksums.clone());
+        }
+
         match std::fs::create_dir("test") {
             Ok(_) => Ok(()),
             Err(err) if err.raw_os_error() == Some(17) => Ok(()), // directory exists; okay
@@ -92,7 +110,6 @@ mod tests {
         .flatten();
 
         let mut hasher = Md5::new();
-        let mut checksums = HashMap::new();
 
         for size in [
             25,
@@ -111,7 +128,7 @@ mod tests {
             assert!(checksums.insert(fname, checksum).is_none());
         }
 
-        Ok(checksums)
+        Ok(checksums.clone())
     }
 
     fn assert_checksums<F>(get_checksums: F, o_direct: bool) -> Result<()>
