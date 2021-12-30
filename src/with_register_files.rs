@@ -1,4 +1,4 @@
-/// This module pre-registers files with io_uring before the reads start.
+// This module pre-registers files with io_uring before the reads start.
 use std::{
     cmp::min,
     fs::File,

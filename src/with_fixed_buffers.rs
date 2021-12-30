@@ -1,4 +1,4 @@
-/// This module pre-registers files and buffers with io_uring before the reads start.
+// This module pre-registers files and buffers with io_uring before the reads start.
 use std::{
     cell::RefCell,
     cmp::min,

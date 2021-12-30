@@ -1,4 +1,4 @@
-/// This module uses io_uring without any fancy options.
+// This module uses io_uring without any fancy options.
 use std::{
     cmp::min,
     fs::File,

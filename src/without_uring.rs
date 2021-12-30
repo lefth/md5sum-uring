@@ -1,4 +1,4 @@
-/// This module uses calculates checksums without io_uring.
+// This module uses calculates checksums without io_uring.
 use std::{path::PathBuf, sync::mpsc::Sender};
 
 use anyhow::Result;
