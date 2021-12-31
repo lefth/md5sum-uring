@@ -44,10 +44,10 @@ performance is comparable.
 ```
 
 #### Cross compiling:
-I use this project to test APIs on ARM. The commands you need may be different from the commands I need.
-In particular, I use "musl" because my target system has musl-based libc and "hf" because the target has
-hardware-based floating point. ("vfpv3+neon" also corresponds to hardware capabilities.) You can also set
-these variables in a config file. This is how I compile the project:
+I use this project to test APIs on ARM. The target you need may be different from mine--
+in particular, I use "musl" because my target system has musl-based libc and "hf" because the target has
+hardware-based floating point. You can also set these variables in a config file. This is how I compile
+the project:
 ```
 CARGO_TARGET_ARMV7_UNKNOWN_LINUX_MUSLEABIHF_LINKER=arm-linux-musleabihf-gcc cargo build --target armv7-unknown-linux-musleabihf --release
 ```
