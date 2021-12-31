@@ -1,11 +1,11 @@
 // This module pre-registers files and buffers with io_uring before the reads start.
 use std::{
-    cell::RefCell,
     cmp::min,
     fs::File,
     os::unix::io::AsRawFd,
     path::{Path, PathBuf},
-    sync::{mpsc::Sender, Arc},
+    pin::Pin,
+    sync::mpsc::Sender,
 };
 
 use anyhow::{bail, Result};
@@ -31,7 +31,7 @@ struct ReadState {
     /// The md5 state is updated as more bytes are read
     ctx: Md5,
     pub file_idx: u32,
-    pub buf: Option<Arc<RefCell<AlignedBuffer>>>,
+    pub buf: Option<Pin<Box<AlignedBuffer>>>,
     pub buf_idx: Option<u16>,
 }
 
@@ -51,10 +51,11 @@ impl ReadState {
         })
     }
 
-    /// Get ready to read file data into a buffer.
-    fn initialize(&mut self, buf: Arc<RefCell<AlignedBuffer>>, buf_idx: u16) {
+    /// Get ready to read file data into a buffer. This takes ownership of the buffer
+    /// and free index.
+    fn initialize(&mut self, mut buf: Pin<Box<AlignedBuffer>>, buf_idx: u16) {
         self.buf_idx.replace(buf_idx);
-        Self::set_buffer_size(&mut *buf.borrow_mut(), self.file_len, self.position);
+        Self::set_buffer_size(&mut buf, self.file_len, self.position);
         self.buf.replace(buf);
     }
 
@@ -75,8 +76,8 @@ impl ReadState {
 
     /// Returns whether the file has been fully read.
     pub(crate) fn update(&mut self) -> bool {
-        let mut buf = self.buf.as_ref().unwrap().borrow_mut();
-        self.ctx.update(&*buf);
+        let mut buf = self.buf.as_mut().unwrap();
+        self.ctx.update(&buf[..]);
         self.position += buf.len() as u64;
         let finished = Self::set_buffer_size(&mut buf, self.file_len, self.position);
 
@@ -107,11 +108,18 @@ pub fn get_checksums(
 
     let mut file_idx = 0;
     let mut read_states: [Option<ReadState>; RING_SIZE] = [READSTATE_NONE; RING_SIZE];
-    let shared_buffers: [Arc<RefCell<AlignedBuffer>>; RING_SIZE] = (0..RING_SIZE)
-        .map(|_| Default::default())
-        .collect::<Vec<_>>()
-        .try_into()
-        .unwrap();
+    let mut shared_buffers: Vec<Option<Pin<Box<AlignedBuffer>>>> = Vec::new();
+    let mut iovecs: Vec<libc::iovec> = Vec::new();
+    for _ in 0..RING_SIZE {
+        let mut buffer: Pin<Box<AlignedBuffer>> = Box::pin(Default::default());
+        let buffer_ptr = buffer.as_mut().as_mut_ptr();
+        iovecs.push(libc::iovec {
+            iov_base: buffer_ptr as *mut _,
+            iov_len: buffer.len(),
+        });
+        shared_buffers.push(Some(buffer));
+    }
+
     let mut free_index_list: Vec<_> = (0..RING_SIZE).into_iter().collect();
     let mut raw_fds = Vec::new();
     let mut files = files
@@ -134,19 +142,7 @@ pub fn get_checksums(
     if raw_fds.len() > 0 {
         ring.submitter().register_files(&raw_fds)?;
 
-        let buffers = shared_buffers
-            .iter()
-            .map(|buffer| {
-                let mut buffer = buffer.borrow_mut();
-                let buffer_ptr = buffer.as_mut_ptr() as *mut _;
-                libc::iovec {
-                    iov_base: buffer_ptr,
-                    iov_len: buffer.len(),
-                }
-            })
-            .collect::<Vec<_>>();
-
-        if let Err(err) = ring.submitter().register_buffers(&buffers) {
+        if let Err(err) = ring.submitter().register_buffers(&iovecs) {
             bail!(
                 "Failed to register fixed buffers (are you running without root?): {}",
                 err
@@ -165,7 +161,7 @@ pub fn get_checksums(
             );
 
             if let Some(mut state) = files.pop() {
-                state.initialize(shared_buffers[free_idx].clone(), free_idx as u16);
+                state.initialize(shared_buffers[free_idx].take().unwrap(), free_idx as u16);
                 read_states[free_idx].replace(state);
                 debug_assert_eq!(
                     free_index_list.len(),
@@ -193,7 +189,13 @@ pub fn get_checksums(
 
             // Wait for a result since the jobs list is full or we just added something
             trace!("Waiting for / handling a result");
-            submit_wait_and_handle_result(&mut ring, &mut read_states, &tx, &mut free_index_list)?;
+            submit_wait_and_handle_result(
+                &mut ring,
+                &mut read_states,
+                &tx,
+                &mut free_index_list,
+                &mut shared_buffers,
+            )?;
         } else {
             // There's no more work that can be added right now, but we still need to handle any
             // active read states
@@ -208,6 +210,7 @@ pub fn get_checksums(
                     &mut read_states,
                     &tx,
                     &mut free_index_list,
+                    &mut shared_buffers,
                 )?;
             }
             break;
@@ -222,6 +225,7 @@ fn submit_wait_and_handle_result(
     read_states: &mut [Option<ReadState>; RING_SIZE],
     tx: &Sender<(PathBuf, Result<md5::Md5, anyhow::Error>)>,
     free_index_list: &mut Vec<usize>,
+    shared_buffers: &mut Vec<Option<Pin<Box<AlignedBuffer>>>>,
 ) -> Result<()> {
     debug_assert_eq!(
         free_index_list.len(),
@@ -249,13 +253,16 @@ fn submit_wait_and_handle_result(
     );
     if finished {
         // It's finished, so free the slot (and get an owned object):
-        let read_state = read_states[completed_idx].take().unwrap();
+        let mut read_state = read_states[completed_idx].take().unwrap();
         free_index_list.push(completed_idx);
         debug_assert_eq!(
             free_index_list.len(),
             read_states.iter().filter(|elem| elem.is_none()).count(),
             "The free index list is out of sync with the read states (3)"
         );
+        // Also return the fixed buffer:
+        shared_buffers[completed_idx] = read_state.buf.take();
+
         tx.send((read_state.path, Ok(read_state.ctx))).unwrap();
     } else {
         trace!("Checksum not finished, resubmitting for read");
@@ -273,7 +280,7 @@ fn submit_wait_and_handle_result(
 /// how much has been read already and how much more is needed.
 fn submit_for_read(ring: &mut IoUring, read_state_ref: &mut ReadState, idx: usize) {
     // get data uring needs to queue a read:
-    let mut buf = read_state_ref.buf.as_ref().unwrap().borrow_mut();
+    let buf = read_state_ref.buf.as_mut().unwrap();
     let read_e = opcode::ReadFixed::new(
         types::Fixed(read_state_ref.file_idx),
         buf.as_mut_ptr(),

@@ -4,6 +4,7 @@ use std::{
     fs::File,
     os::unix::io::AsRawFd,
     path::{Path, PathBuf},
+    pin::Pin,
     sync::mpsc::Sender,
 };
 
@@ -23,7 +24,7 @@ struct Buffer {
     pub path: PathBuf,
     pub fd: File,
     file_len: u64,
-    pub buf: Box<AlignedBuffer>,
+    pub buf: Pin<Box<AlignedBuffer>>,
     /// How many bytes have been read
     pub position: u64,
     /// The md5 state is updated as more bytes are read
@@ -38,7 +39,7 @@ impl Buffer {
             path: path.to_owned(),
             fd,
             file_len,
-            buf: Default::default(),
+            buf: Box::pin(Default::default()),
             position: 0,
             ctx: Md5::new(),
         };
