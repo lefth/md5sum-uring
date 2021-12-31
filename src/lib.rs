@@ -273,6 +273,7 @@ mod tests {
     }
 
     #[test]
+    /// This will fail on WSL2 and networked files.
     fn test_simplest_o_direct() -> Result<()> {
         setup();
         let _ = file_setup()?;
