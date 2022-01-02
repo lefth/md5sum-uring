@@ -2,6 +2,7 @@
 use std::{
     cmp::min,
     fs::File,
+    hash::BuildHasherDefault,
     os::unix::io::AsRawFd,
     path::{Path, PathBuf},
     pin::Pin,
@@ -13,10 +14,11 @@ use io_uring::{opcode, types, IoUring, Probe};
 #[allow(unused_imports)]
 use log::{debug, error, info, trace, warn};
 use md5::{Digest, Md5};
+use nohash_hasher::NoHashHasher;
 
 use crate::*;
 
-const BUFFER_NONE: Option<Buffer> = None;
+type HashMap<K, V> = std::collections::HashMap<K, V, BuildHasherDefault<NoHashHasher<K>>>;
 
 /// This struct holds the state and buffers of a file that's being read, particularly
 /// when one read finishes but more reads are required to finish the file.
@@ -81,7 +83,10 @@ pub fn get_checksums(
     }
 
     let mut file_idx = 0;
-    let mut shared_buffers: [Option<Buffer>; RING_SIZE] = [BUFFER_NONE; RING_SIZE];
+
+    // This is a list of buffers that needs to be indexed by the "user data" handle
+    // that is submitted to the kernel with each job and later returned.
+    let mut shared_buffers: HashMap<usize, Buffer> = Default::default();
     let mut free_index_list: Vec<_> = (0..RING_SIZE).into_iter().collect();
     let mut raw_fds = Vec::new();
     let mut files = files
@@ -113,15 +118,13 @@ pub fn get_checksums(
             );
 
             if let Some(buffer) = files.pop() {
-                // Put the buffer into the array so it will have a constant location until it's removed
-                // after being populated:
-                shared_buffers[free_idx].replace(buffer);
+                shared_buffers.insert(free_idx, buffer);
                 debug_assert_eq!(
                     free_index_list.len(),
-                    shared_buffers.iter().filter(|elem| elem.is_none()).count(),
+                    RING_SIZE - shared_buffers.len(),
                     "The free index list is out of sync with the work buffers (1)"
                 );
-                let buffer_ref = shared_buffers[free_idx].as_mut().unwrap();
+                let buffer_ref = shared_buffers.get_mut(&free_idx).unwrap();
                 new_work_queued = true;
                 submit_for_read(&mut ring, buffer_ref, free_idx);
             } else {
@@ -173,13 +176,13 @@ pub fn get_checksums(
 
 fn submit_wait_and_handle_result(
     ring: &mut IoUring,
-    shared_buffers: &mut [Option<Buffer>; RING_SIZE],
+    shared_buffers: &mut HashMap<usize, Buffer>,
     tx: &Sender<(PathBuf, Result<md5::Md5, anyhow::Error>)>,
     free_index_list: &mut Vec<usize>,
 ) -> Result<()> {
     debug_assert_eq!(
         free_index_list.len(),
-        shared_buffers.iter().filter(|elem| elem.is_none()).count(),
+        RING_SIZE - shared_buffers.len(),
         "The free index list is out of sync with the work buffers (2)"
     );
 
@@ -191,8 +194,8 @@ fn submit_wait_and_handle_result(
         .user_data() as usize;
 
     // Next, consume and handle bytes in the buffer:
-    let mut buffer = shared_buffers[completed_idx]
-        .as_mut()
+    let mut buffer = shared_buffers
+        .get_mut(&completed_idx)
         .expect("should exist because we chose its index");
 
     buffer.position += buffer.buf.len() as u64;
@@ -207,11 +210,11 @@ fn submit_wait_and_handle_result(
     buffer.set_buffer_size();
     if buffer.buf.len() == 0 {
         // It's finished, so free the slot (and get an owned object):
-        let buffer = shared_buffers[completed_idx].take().unwrap();
+        let buffer = shared_buffers.remove(&completed_idx).unwrap();
         free_index_list.push(completed_idx);
         debug_assert_eq!(
             free_index_list.len(),
-            shared_buffers.iter().filter(|elem| elem.is_none()).count(),
+            RING_SIZE - shared_buffers.len(),
             "The free index list is out of sync with the work buffers (3)"
         );
         tx.send((buffer.path, Ok(buffer.ctx))).unwrap();
@@ -219,7 +222,7 @@ fn submit_wait_and_handle_result(
         trace!("Checksum not finished, resubmitting for read");
         submit_for_read(
             ring,
-            shared_buffers[completed_idx].as_mut().unwrap(),
+            shared_buffers.get_mut(&completed_idx).unwrap(),
             completed_idx,
         );
     }

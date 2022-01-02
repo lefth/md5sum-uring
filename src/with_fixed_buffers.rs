@@ -2,6 +2,7 @@
 use std::{
     cmp::min,
     fs::File,
+    hash::BuildHasherDefault,
     os::unix::io::AsRawFd,
     path::{Path, PathBuf},
     pin::Pin,
@@ -13,10 +14,11 @@ use io_uring::{opcode, types, IoUring, Probe};
 #[allow(unused_imports)]
 use log::{debug, error, info, trace, warn};
 use md5::{Digest, Md5};
+use nohash_hasher::NoHashHasher;
 
 use crate::*;
 
-const READSTATE_NONE: Option<ReadState> = None;
+type HashMap<K, V> = std::collections::HashMap<K, V, BuildHasherDefault<NoHashHasher<K>>>;
 
 /// This struct holds the state of a file that's being read, particularly
 /// when one read finishes but more reads are required to finish the file.
@@ -107,17 +109,17 @@ pub fn get_checksums(
     }
 
     let mut file_idx = 0;
-    let mut read_states: [Option<ReadState>; RING_SIZE] = [READSTATE_NONE; RING_SIZE];
-    let mut shared_buffers: Vec<Option<Pin<Box<AlignedBuffer>>>> = Vec::new();
+    let mut read_states: HashMap<usize, ReadState> = Default::default();
+    let mut shared_buffers: HashMap<usize, Pin<Box<AlignedBuffer>>> = Default::default();
     let mut iovecs: Vec<libc::iovec> = Vec::new();
-    for _ in 0..RING_SIZE {
+    for i in 0..RING_SIZE {
         let mut buffer: Pin<Box<AlignedBuffer>> = Box::pin(Default::default());
         let buffer_ptr = buffer.as_mut().as_mut_ptr();
         iovecs.push(libc::iovec {
             iov_base: buffer_ptr as *mut _,
             iov_len: buffer.len(),
         });
-        shared_buffers.push(Some(buffer));
+        shared_buffers.insert(i, buffer);
     }
 
     let mut free_index_list: Vec<_> = (0..RING_SIZE).into_iter().collect();
@@ -161,14 +163,14 @@ pub fn get_checksums(
             );
 
             if let Some(mut state) = files.pop() {
-                state.initialize(shared_buffers[free_idx].take().unwrap(), free_idx as u16);
-                read_states[free_idx].replace(state);
+                state.initialize(shared_buffers.remove(&free_idx).unwrap(), free_idx as u16);
+                read_states.insert(free_idx, state);
                 debug_assert_eq!(
                     free_index_list.len(),
-                    read_states.iter().filter(|elem| elem.is_none()).count(),
+                    RING_SIZE - read_states.len(),
                     "The free index list is out of sync with the work read states (1)"
                 );
-                let read_state_ref = read_states[free_idx].as_mut().unwrap();
+                let read_state_ref = read_states.get_mut(&free_idx).unwrap();
                 new_work_queued = true;
                 submit_for_read(&mut ring, read_state_ref, free_idx);
             } else {
@@ -222,14 +224,14 @@ pub fn get_checksums(
 
 fn submit_wait_and_handle_result(
     ring: &mut IoUring,
-    read_states: &mut [Option<ReadState>; RING_SIZE],
+    read_states: &mut HashMap<usize, ReadState>,
     tx: &Sender<(PathBuf, Result<md5::Md5, anyhow::Error>)>,
     free_index_list: &mut Vec<usize>,
-    shared_buffers: &mut Vec<Option<Pin<Box<AlignedBuffer>>>>,
+    shared_buffers: &mut HashMap<usize, Pin<Box<AlignedBuffer>>>,
 ) -> Result<()> {
     debug_assert_eq!(
         free_index_list.len(),
-        read_states.iter().filter(|elem| elem.is_none()).count(),
+        RING_SIZE - read_states.len(),
         "The free index list is out of sync with the read states (2)"
     );
 
@@ -241,8 +243,8 @@ fn submit_wait_and_handle_result(
         .user_data() as usize;
 
     // Next, consume and handle bytes in the buffer:
-    let read_state = read_states[completed_idx]
-        .as_mut()
+    let read_state = read_states
+        .get_mut(&completed_idx)
         .expect("should exist because we chose its index");
 
     let finished = read_state.update();
@@ -253,22 +255,22 @@ fn submit_wait_and_handle_result(
     );
     if finished {
         // It's finished, so free the slot (and get an owned object):
-        let mut read_state = read_states[completed_idx].take().unwrap();
+        let mut read_state = read_states.remove(&completed_idx).unwrap();
         free_index_list.push(completed_idx);
         debug_assert_eq!(
             free_index_list.len(),
-            read_states.iter().filter(|elem| elem.is_none()).count(),
+            RING_SIZE - read_states.len(),
             "The free index list is out of sync with the read states (3)"
         );
         // Also return the fixed buffer:
-        shared_buffers[completed_idx] = read_state.buf.take();
+        shared_buffers.insert(completed_idx, read_state.buf.take().unwrap());
 
         tx.send((read_state.path, Ok(read_state.ctx))).unwrap();
     } else {
         trace!("Checksum not finished, resubmitting for read");
         submit_for_read(
             ring,
-            read_states[completed_idx].as_mut().unwrap(),
+            read_states.get_mut(&completed_idx).unwrap(),
             completed_idx,
         );
     }
