@@ -205,7 +205,7 @@ mod tests {
         let checksums = file_setup()?;
 
         let (tx, rx) = channel();
-        crossbeam::scope(|s| -> Result<()> {
+        crossbeam_utils::thread::scope(|s| -> Result<()> {
             let handle = s.spawn(|_| -> Result<()> {
                 get_checksums(checksums.keys().cloned().collect(), tx, o_direct)?;
                 Ok(())
