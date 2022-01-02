@@ -34,7 +34,7 @@ pub struct Opt {
     pub use_fixed_buffers: bool,
 
     /// Compute checksums without the io_uring feature.
-    #[structopt(long, conflicts_with_all = &["preregister-files", "use-fixed-buffers", "o-direct"])]
+    #[structopt(long, conflicts_with_all = &["pre-register-files", "use-fixed-buffers", "o-direct"])]
     pub no_uring: bool,
 
     /// Open files with the O_DIRECT flag for performance.
