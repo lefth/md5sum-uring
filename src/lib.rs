@@ -121,7 +121,8 @@ pub fn open(path: impl AsRef<Path>, o_direct: bool) -> std::io::Result<File> {
 mod tests {
     use std::{
         collections::HashMap,
-        io::{Read, Write},
+        fs::OpenOptions,
+        io::{ErrorKind, Read, Write},
         mem::align_of,
         path::PathBuf,
         sync::{
@@ -187,12 +188,27 @@ mod tests {
             MAX_READ_SIZE * 3,
         ] {
             let fname = PathBuf::from(format!("test/file-{}", size));
-            let mut file = std::fs::File::create(&fname)?;
+
             let data = iter.take(size).collect::<Vec<_>>();
-            file.write(&data)?;
             hasher.update(&data);
             let checksum: [u8; 16] = hasher.finalize_reset().try_into()?;
-            assert!(checksums.insert(fname, checksum).is_none());
+            assert!(checksums.insert(fname.clone(), checksum).is_none());
+
+            let file = OpenOptions::new()
+                .write(true)
+                .read(false)
+                // fail on existing:
+                .create_new(true)
+                .open(&fname);
+
+            if matches!(&file, Err(err) if err.kind() == ErrorKind::AlreadyExists) {
+                // Skip files that already exist. They should already have the same contents,
+                // and overwriting them is a security risk since some of these tests need to
+                // run as root:
+                continue;
+            }
+
+            file?.write(&data)?;
         }
 
         Ok(checksums.clone())
